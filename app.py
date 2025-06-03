@@ -12,6 +12,12 @@ AVAILABLE_MODELS = {
     "Animagine XL 3.0": "cagliostrolab/animagine-xl-3.0",
 }
 
+# Available LoRA styles
+AVAILABLE_LORAS = {
+    "TCD": "h1t/TCD-SDXL-LoRA",
+    "Papercut": "TheLastBen/Papercut_SDXL",
+}
+
 def load_image_from_url(url):
     response = requests.get(url)
     return Image.open(io.BytesIO(response.content)).convert("RGB")
@@ -59,6 +65,38 @@ def generate_community_image(prompt, model_name, seed, num_steps, guidance_scale
     # Load and fuse LoRA weights
     pipe.load_lora_weights(tcd_lora_id)
     pipe.fuse_lora()
+    
+    # Generate the image
+    generator = torch.Generator().manual_seed(seed)
+    image = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        eta=eta,
+        generator=generator,
+    ).images[0]
+    
+    return image
+
+def generate_style_mix(prompt, seed, num_steps, guidance_scale, eta, style_weight):
+    # Initialize the pipeline
+    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+    styled_lora_id = "TheLastBen/Papercut_SDXL"
+    
+    # Use CPU for inference
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        base_model_id,
+        torch_dtype=torch.float32  # Use float32 for CPU
+    )
+    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+    
+    # Load multiple LoRA weights
+    pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd")
+    pipe.load_lora_weights(styled_lora_id, adapter_name="style")
+    
+    # Set adapter weights
+    pipe.set_adapters(["tcd", "style"], adapter_weights=[1.0, style_weight])
     
     # Generate the image
     generator = torch.Generator().manual_seed(seed)
@@ -189,6 +227,32 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     community_steps, community_guidance, community_eta
                 ],
                 outputs=community_output
+            )
+            
+        with gr.TabItem("Style Mixing"):
+            with gr.Row():
+                with gr.Column():
+                    style_prompt = gr.Textbox(
+                        label="Prompt",
+                        value="papercut of a winter mountain, snow",
+                        lines=3
+                    )
+                    style_seed = gr.Slider(minimum=0, maximum=2147483647, value=0, label="Seed", step=1)
+                    style_steps = gr.Slider(minimum=1, maximum=10, value=4, label="Number of Steps", step=1)
+                    style_guidance = gr.Slider(minimum=0, maximum=1, value=0, label="Guidance Scale")
+                    style_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
+                    style_weight = gr.Slider(minimum=0, maximum=2, value=1.0, label="Style Weight", step=0.1)
+                    style_button = gr.Button("Generate")
+                with gr.Column():
+                    style_output = gr.Image(label="Generated Image")
+            
+            style_button.click(
+                fn=generate_style_mix,
+                inputs=[
+                    style_prompt, style_seed, style_steps,
+                    style_guidance, style_eta, style_weight
+                ],
+                outputs=style_output
             )
 
 if __name__ == "__main__":
