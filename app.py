@@ -1,10 +1,18 @@
 import torch
+import numpy as np
 import gradio as gr
-from diffusers import StableDiffusionXLPipeline, AutoPipelineForInpainting, TCDScheduler
+from diffusers import (
+    StableDiffusionXLPipeline, 
+    AutoPipelineForInpainting, 
+    TCDScheduler,
+    ControlNetModel,
+    StableDiffusionXLControlNetPipeline
+)
 from diffusers.utils import make_image_grid
 from PIL import Image
 import io
 import requests
+from transformers import DPTImageProcessor, DPTForDepthEstimation
 
 # Available models
 AVAILABLE_MODELS = {
@@ -17,6 +25,33 @@ AVAILABLE_LORAS = {
     "TCD": "h1t/TCD-SDXL-LoRA",
     "Papercut": "TheLastBen/Papercut_SDXL",
 }
+
+def get_depth_map(image):
+    # Initialize depth estimator
+    depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas")
+    feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
+    
+    # Process image
+    image = feature_extractor(images=image, return_tensors="pt").pixel_values
+    with torch.no_grad():
+        depth_map = depth_estimator(image).predicted_depth
+
+    # Resize and normalize depth map
+    depth_map = torch.nn.functional.interpolate(
+        depth_map.unsqueeze(1),
+        size=(1024, 1024),
+        mode="bicubic",
+        align_corners=False,
+    )
+    depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+    depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+    depth_map = (depth_map - depth_min) / (depth_max - depth_min)
+    image = torch.cat([depth_map] * 3, dim=1)
+
+    # Convert to PIL Image
+    image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
+    image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
+    return image
 
 def load_image_from_url(url):
     response = requests.get(url)
@@ -109,6 +144,49 @@ def generate_style_mix(prompt, seed, num_steps, guidance_scale, eta, style_weigh
     ).images[0]
     
     return image
+
+def generate_controlnet(prompt, init_image, seed, num_steps, guidance_scale, eta, controlnet_scale):
+    # Initialize the pipeline
+    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+    controlnet_id = "diffusers/controlnet-depth-sdxl-1.0"
+    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+    
+    # Initialize ControlNet
+    controlnet = ControlNetModel.from_pretrained(
+        controlnet_id,
+        torch_dtype=torch.float32  # Use float32 for CPU
+    )
+    
+    # Initialize pipeline
+    pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+        base_model_id,
+        controlnet=controlnet,
+        torch_dtype=torch.float32  # Use float32 for CPU
+    )
+    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+    
+    # Load and fuse LoRA weights
+    pipe.load_lora_weights(tcd_lora_id)
+    pipe.fuse_lora()
+    
+    # Generate depth map
+    depth_image = get_depth_map(init_image)
+    
+    # Generate the image
+    generator = torch.Generator().manual_seed(seed)
+    image = pipe(
+        prompt=prompt,
+        image=depth_image,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        eta=eta,
+        controlnet_conditioning_scale=controlnet_scale,
+        generator=generator,
+    ).images[0]
+    
+    # Create a grid of the depth map and result
+    grid = make_image_grid([depth_image, image], rows=1, cols=2)
+    return grid
 
 def inpaint_image(prompt, init_image, mask_image, seed, num_steps, guidance_scale, eta, strength):
     # Initialize the pipeline
@@ -253,6 +331,33 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     style_guidance, style_eta, style_weight
                 ],
                 outputs=style_output
+            )
+            
+        with gr.TabItem("ControlNet"):
+            with gr.Row():
+                with gr.Column():
+                    control_prompt = gr.Textbox(
+                        label="Prompt",
+                        value="stormtrooper lecture, photorealistic",
+                        lines=3
+                    )
+                    control_image = gr.Image(label="Input Image", type="pil")
+                    control_seed = gr.Slider(minimum=0, maximum=2147483647, value=0, label="Seed", step=1)
+                    control_steps = gr.Slider(minimum=1, maximum=10, value=4, label="Number of Steps", step=1)
+                    control_guidance = gr.Slider(minimum=0, maximum=1, value=0, label="Guidance Scale")
+                    control_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
+                    control_scale = gr.Slider(minimum=0, maximum=1, value=0.5, label="ControlNet Scale", step=0.1)
+                    control_button = gr.Button("Generate")
+                with gr.Column():
+                    control_output = gr.Image(label="Result (Depth Map | Generated)")
+            
+            control_button.click(
+                fn=generate_controlnet,
+                inputs=[
+                    control_prompt, control_image, control_seed,
+                    control_steps, control_guidance, control_eta, control_scale
+                ],
+                outputs=control_output
             )
 
 if __name__ == "__main__":
