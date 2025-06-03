@@ -6,6 +6,12 @@ from PIL import Image
 import io
 import requests
 
+# Available models
+AVAILABLE_MODELS = {
+    "Stable Diffusion XL": "stabilityai/stable-diffusion-xl-base-1.0",
+    "Animagine XL 3.0": "cagliostrolab/animagine-xl-3.0",
+}
+
 def load_image_from_url(url):
     response = requests.get(url)
     return Image.open(io.BytesIO(response.content)).convert("RGB")
@@ -18,8 +24,35 @@ def generate_image(prompt, seed, num_steps, guidance_scale, eta):
     # Use CPU for inference
     pipe = StableDiffusionXLPipeline.from_pretrained(
         base_model_id,
-        torch_dtype=torch.float32,  # Use float32 for CPU
-        variant="fp16"
+        torch_dtype=torch.float32  # Use float32 for CPU
+    )
+    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+    
+    # Load and fuse LoRA weights
+    pipe.load_lora_weights(tcd_lora_id)
+    pipe.fuse_lora()
+    
+    # Generate the image
+    generator = torch.Generator().manual_seed(seed)
+    image = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        eta=eta,
+        generator=generator,
+    ).images[0]
+    
+    return image
+
+def generate_community_image(prompt, model_name, seed, num_steps, guidance_scale, eta):
+    # Initialize the pipeline
+    base_model_id = AVAILABLE_MODELS[model_name]
+    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+    
+    # Use CPU for inference
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        base_model_id,
+        torch_dtype=torch.float32  # Use float32 for CPU
     )
     pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
     
@@ -47,8 +80,7 @@ def inpaint_image(prompt, init_image, mask_image, seed, num_steps, guidance_scal
     # Use CPU for inference
     pipe = AutoPipelineForInpainting.from_pretrained(
         base_model_id,
-        torch_dtype=torch.float32,  # Use float32 for CPU
-        variant="fp16"
+        torch_dtype=torch.float32  # Use float32 for CPU
     )
     pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
     
@@ -127,6 +159,36 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     inpaint_steps, inpaint_guidance, inpaint_eta, inpaint_strength
                 ],
                 outputs=inpaint_output
+            )
+            
+        with gr.TabItem("Community Models"):
+            with gr.Row():
+                with gr.Column():
+                    community_prompt = gr.Textbox(
+                        label="Prompt",
+                        value="A man, clad in a meticulously tailored military uniform, stands with unwavering resolve. The uniform boasts intricate details, and his eyes gleam with determination. Strands of vibrant, windswept hair peek out from beneath the brim of his cap.",
+                        lines=3
+                    )
+                    model_dropdown = gr.Dropdown(
+                        choices=list(AVAILABLE_MODELS.keys()),
+                        value="Animagine XL 3.0",
+                        label="Select Model"
+                    )
+                    community_seed = gr.Slider(minimum=0, maximum=2147483647, value=0, label="Seed", step=1)
+                    community_steps = gr.Slider(minimum=1, maximum=10, value=8, label="Number of Steps", step=1)
+                    community_guidance = gr.Slider(minimum=0, maximum=1, value=0, label="Guidance Scale")
+                    community_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
+                    community_button = gr.Button("Generate")
+                with gr.Column():
+                    community_output = gr.Image(label="Generated Image")
+            
+            community_button.click(
+                fn=generate_community_image,
+                inputs=[
+                    community_prompt, model_dropdown, community_seed,
+                    community_steps, community_guidance, community_eta
+                ],
+                outputs=community_output
             )
 
 if __name__ == "__main__":
