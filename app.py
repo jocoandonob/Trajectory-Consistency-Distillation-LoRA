@@ -6,9 +6,11 @@ from diffusers import (
     AutoPipelineForInpainting, 
     TCDScheduler,
     ControlNetModel,
-    StableDiffusionXLControlNetPipeline
+    StableDiffusionXLControlNetPipeline,
+    MotionAdapter,
+    AnimateDiffPipeline
 )
-from diffusers.utils import make_image_grid
+from diffusers.utils import make_image_grid, export_to_gif
 from PIL import Image
 import io
 import requests
@@ -221,6 +223,55 @@ def inpaint_image(prompt, init_image, mask_image, seed, num_steps, guidance_scal
     grid = make_image_grid([init_image, mask_image, image], rows=1, cols=3)
     return grid
 
+def generate_animation(prompt, seed, num_steps, guidance_scale, eta, num_frames, motion_scale):
+    # Initialize the pipeline
+    base_model_id = "frankjoshua/toonyou_beta6"
+    motion_adapter_id = "guoyww/animatediff-motion-adapter-v1-5"
+    tcd_lora_id = "h1t/TCD-SD15-LoRA"
+    motion_lora_id = "guoyww/animatediff-motion-lora-zoom-in"
+    
+    # Load motion adapter
+    adapter = MotionAdapter.from_pretrained(motion_adapter_id)
+    
+    # Initialize pipeline with CPU optimization
+    pipe = AnimateDiffPipeline.from_pretrained(
+        base_model_id,
+        motion_adapter=adapter,
+        torch_dtype=torch.float32,  # Use float32 for CPU
+        low_cpu_mem_usage=True,     # Enable low CPU memory usage
+        use_safetensors=False       # Use standard PyTorch weights
+    )
+    
+    # Set TCD scheduler
+    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+    
+    # Load LoRA weights
+    pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd")
+    pipe.load_lora_weights(
+        motion_lora_id,
+        adapter_name="motion-lora"
+    )
+    
+    # Set adapter weights
+    pipe.set_adapters(["tcd", "motion-lora"], adapter_weights=[1.0, motion_scale])
+    
+    # Generate animation
+    generator = torch.Generator().manual_seed(seed)
+    frames = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        cross_attention_kwargs={"scale": 1},
+        num_frames=num_frames,
+        eta=eta,
+        generator=generator
+    ).frames[0]
+    
+    # Export to GIF
+    gif_path = "animation.gif"
+    export_to_gif(frames, gif_path)
+    return gif_path
+
 # Create the Gradio interface
 with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
     gr.Markdown("# TCD-SDXL Image Generator")
@@ -358,6 +409,34 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     control_steps, control_guidance, control_eta, control_scale
                 ],
                 outputs=control_output
+            )
+
+        with gr.TabItem("Animation"):
+            with gr.Row():
+                with gr.Column():
+                    anim_prompt = gr.Textbox(
+                        label="Prompt",
+                        value="best quality, masterpiece, 1girl, looking at viewer, blurry background, upper body, contemporary, dress",
+                        lines=3
+                    )
+                    anim_seed = gr.Slider(minimum=0, maximum=2147483647, value=0, label="Seed", step=1)
+                    anim_steps = gr.Slider(minimum=1, maximum=10, value=5, label="Number of Steps", step=1)
+                    anim_guidance = gr.Slider(minimum=0, maximum=1, value=0, label="Guidance Scale")
+                    anim_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
+                    anim_frames = gr.Slider(minimum=8, maximum=32, value=24, label="Number of Frames", step=1)
+                    anim_motion_scale = gr.Slider(minimum=0, maximum=2, value=1.2, label="Motion Scale", step=0.1)
+                    anim_button = gr.Button("Generate Animation")
+                with gr.Column():
+                    anim_output = gr.Image(label="Generated Animation", format="gif")
+            
+            anim_button.click(
+                fn=generate_animation,
+                inputs=[
+                    anim_prompt, anim_seed, anim_steps,
+                    anim_guidance, anim_eta, anim_frames,
+                    anim_motion_scale
+                ],
+                outputs=anim_output
             )
 
 if __name__ == "__main__":
