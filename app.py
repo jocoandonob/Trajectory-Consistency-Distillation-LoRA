@@ -15,6 +15,7 @@ from PIL import Image
 import io
 import requests
 from transformers import DPTImageProcessor, DPTForDepthEstimation
+import gc
 
 # Available models
 AVAILABLE_MODELS = {
@@ -27,6 +28,21 @@ AVAILABLE_LORAS = {
     "TCD": "h1t/TCD-SDXL-LoRA",
     "Papercut": "TheLastBen/Papercut_SDXL",
 }
+
+def get_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+def get_dtype():
+    if torch.cuda.is_available():
+        return torch.float16
+    return torch.float32
+
+def cleanup_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 def get_depth_map(image):
     # Initialize depth estimator
@@ -60,222 +76,303 @@ def load_image_from_url(url):
     return Image.open(io.BytesIO(response.content)).convert("RGB")
 
 def generate_image(prompt, seed, num_steps, guidance_scale, eta):
-    # Initialize the pipeline
-    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
-    
-    # Use CPU for inference
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load and fuse LoRA weights
-    pipe.load_lora_weights(tcd_lora_id)
-    pipe.fuse_lora()
-    
-    # Generate the image
-    generator = torch.Generator().manual_seed(seed)
-    image = pipe(
-        prompt=prompt,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        eta=eta,
-        generator=generator,
-    ).images[0]
-    
-    return image
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+        tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+        
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            base_model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load and fuse LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, prefix=None)
+        pipe.fuse_lora()
+        
+        # Generate the image
+        generator = torch.Generator(device=device).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            generator=generator,
+        ).images[0]
+        
+        # Cleanup
+        del pipe
+        cleanup_memory()
+        
+        return image, "Image generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, f"Error generating image: {str(e)}"
 
 def generate_community_image(prompt, model_name, seed, num_steps, guidance_scale, eta):
-    # Initialize the pipeline
-    base_model_id = AVAILABLE_MODELS[model_name]
-    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
-    
-    # Use CPU for inference
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load and fuse LoRA weights
-    pipe.load_lora_weights(tcd_lora_id)
-    pipe.fuse_lora()
-    
-    # Generate the image
-    generator = torch.Generator().manual_seed(seed)
-    image = pipe(
-        prompt=prompt,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        eta=eta,
-        generator=generator,
-    ).images[0]
-    
-    return image
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = AVAILABLE_MODELS[model_name]
+        tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+        
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            base_model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+        ).to(device)
+        
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load and fuse LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, prefix=None)
+        pipe.fuse_lora()
+        
+        # Generate the image
+        generator = torch.Generator(device=device).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            generator=generator,
+        ).images[0]
+        
+        # Cleanup
+        del pipe
+        cleanup_memory()
+        
+        return image, "Image generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, f"Error generating image: {str(e)}"
 
 def generate_style_mix(prompt, seed, num_steps, guidance_scale, eta, style_weight):
-    # Initialize the pipeline
-    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
-    styled_lora_id = "TheLastBen/Papercut_SDXL"
-    
-    # Use CPU for inference
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load multiple LoRA weights
-    pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd")
-    pipe.load_lora_weights(styled_lora_id, adapter_name="style")
-    
-    # Set adapter weights
-    pipe.set_adapters(["tcd", "style"], adapter_weights=[1.0, style_weight])
-    
-    # Generate the image
-    generator = torch.Generator().manual_seed(seed)
-    image = pipe(
-        prompt=prompt,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        eta=eta,
-        generator=generator,
-    ).images[0]
-    
-    return image
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+        tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+        styled_lora_id = "TheLastBen/Papercut_SDXL"
+        
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            base_model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load multiple LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd", prefix=None)
+        pipe.load_lora_weights(styled_lora_id, adapter_name="style", prefix=None)
+        
+        # Set adapter weights
+        pipe.set_adapters(["tcd", "style"], adapter_weights=[1.0, style_weight])
+        
+        # Generate the image
+        generator = torch.Generator(device=device).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            generator=generator,
+        ).images[0]
+        
+        # Cleanup
+        del pipe
+        cleanup_memory()
+        
+        return image, "Image generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, f"Error generating image: {str(e)}"
 
 def generate_controlnet(prompt, init_image, seed, num_steps, guidance_scale, eta, controlnet_scale):
-    # Initialize the pipeline
-    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-    controlnet_id = "diffusers/controlnet-depth-sdxl-1.0"
-    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
-    
-    # Initialize ControlNet
-    controlnet = ControlNetModel.from_pretrained(
-        controlnet_id,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    
-    # Initialize pipeline
-    pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-        base_model_id,
-        controlnet=controlnet,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load and fuse LoRA weights
-    pipe.load_lora_weights(tcd_lora_id)
-    pipe.fuse_lora()
-    
-    # Generate depth map
-    depth_image = get_depth_map(init_image)
-    
-    # Generate the image
-    generator = torch.Generator().manual_seed(seed)
-    image = pipe(
-        prompt=prompt,
-        image=depth_image,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        eta=eta,
-        controlnet_conditioning_scale=controlnet_scale,
-        generator=generator,
-    ).images[0]
-    
-    # Create a grid of the depth map and result
-    grid = make_image_grid([depth_image, image], rows=1, cols=2)
-    return grid
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+        controlnet_id = "diffusers/controlnet-depth-sdxl-1.0"
+        tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+        
+        # Initialize ControlNet
+        controlnet = ControlNetModel.from_pretrained(
+            controlnet_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        # Initialize pipeline
+        pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
+            base_model_id,
+            controlnet=controlnet,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load and fuse LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, prefix=None)
+        pipe.fuse_lora()
+        
+        # Generate depth map
+        depth_image = get_depth_map(init_image)
+        
+        # Generate the image
+        generator = torch.Generator(device=device).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            image=depth_image,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            controlnet_conditioning_scale=controlnet_scale,
+            generator=generator,
+        ).images[0]
+        
+        # Create a grid of the depth map and result
+        grid = make_image_grid([depth_image, image], rows=1, cols=2)
+        
+        # Cleanup
+        del pipe, controlnet
+        cleanup_memory()
+        
+        return grid, "Image generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, f"Error generating image: {str(e)}"
 
 def inpaint_image(prompt, init_image, mask_image, seed, num_steps, guidance_scale, eta, strength):
-    # Initialize the pipeline
-    base_model_id = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
-    tcd_lora_id = "h1t/TCD-SDXL-LoRA"
-    
-    # Use CPU for inference
-    pipe = AutoPipelineForInpainting.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.float32  # Use float32 for CPU
-    )
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load and fuse LoRA weights
-    pipe.load_lora_weights(tcd_lora_id)
-    pipe.fuse_lora()
-    
-    # Generate the image
-    generator = torch.Generator().manual_seed(seed)
-    image = pipe(
-        prompt=prompt,
-        image=init_image,
-        mask_image=mask_image,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        eta=eta,
-        strength=strength,
-        generator=generator,
-    ).images[0]
-    
-    # Create a grid of the original image, mask, and result
-    grid = make_image_grid([init_image, mask_image, image], rows=1, cols=3)
-    return grid
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+        tcd_lora_id = "h1t/TCD-SDXL-LoRA"
+        
+        pipe = AutoPipelineForInpainting.from_pretrained(
+            base_model_id,
+            torch_dtype=dtype,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load and fuse LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, prefix=None)
+        pipe.fuse_lora()
+        
+        # Generate the image
+        generator = torch.Generator(device=device).manual_seed(seed)
+        image = pipe(
+            prompt=prompt,
+            image=init_image,
+            mask_image=mask_image,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            eta=eta,
+            strength=strength,
+            generator=generator,
+        ).images[0]
+        
+        # Cleanup
+        del pipe
+        cleanup_memory()
+        
+        # Return individual images instead of a grid
+        return init_image, mask_image, image, "Image generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, None, None, f"Error generating image: {str(e)}"
 
 def generate_animation(prompt, seed, num_steps, guidance_scale, eta, num_frames, motion_scale):
-    # Initialize the pipeline
-    base_model_id = "frankjoshua/toonyou_beta6"
-    motion_adapter_id = "guoyww/animatediff-motion-adapter-v1-5"
-    tcd_lora_id = "h1t/TCD-SD15-LoRA"
-    motion_lora_id = "guoyww/animatediff-motion-lora-zoom-in"
-    
-    # Load motion adapter
-    adapter = MotionAdapter.from_pretrained(motion_adapter_id)
-    
-    # Initialize pipeline with CPU optimization
-    pipe = AnimateDiffPipeline.from_pretrained(
-        base_model_id,
-        motion_adapter=adapter,
-        torch_dtype=torch.float32,  # Use float32 for CPU
-        low_cpu_mem_usage=True,     # Enable low CPU memory usage
-        use_safetensors=False       # Use standard PyTorch weights
-    )
-    
-    # Set TCD scheduler
-    pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
-    
-    # Load LoRA weights
-    pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd")
-    pipe.load_lora_weights(
-        motion_lora_id,
-        adapter_name="motion-lora"
-    )
-    
-    # Set adapter weights
-    pipe.set_adapters(["tcd", "motion-lora"], adapter_weights=[1.0, motion_scale])
-    
-    # Generate animation
-    generator = torch.Generator().manual_seed(seed)
-    frames = pipe(
-        prompt=prompt,
-        num_inference_steps=num_steps,
-        guidance_scale=guidance_scale,
-        cross_attention_kwargs={"scale": 1},
-        num_frames=num_frames,
-        eta=eta,
-        generator=generator
-    ).frames[0]
-    
-    # Export to GIF
-    gif_path = "animation.gif"
-    export_to_gif(frames, gif_path)
-    return gif_path
+    try:
+        device = get_device()
+        dtype = get_dtype()
+        
+        # Initialize the pipeline
+        base_model_id = "frankjoshua/toonyou_beta6"
+        motion_adapter_id = "guoyww/animatediff-motion-adapter-v1-5"
+        tcd_lora_id = "h1t/TCD-SD15-LoRA"
+        motion_lora_id = "guoyww/animatediff-motion-lora-zoom-in"
+        
+        # Load motion adapter
+        adapter = MotionAdapter.from_pretrained(motion_adapter_id).to(device)
+        
+        # Initialize pipeline with optimization
+        pipe = AnimateDiffPipeline.from_pretrained(
+            base_model_id,
+            motion_adapter=adapter,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            variant="fp16" if device == "cuda" else None
+        ).to(device)
+        
+        # Set TCD scheduler
+        pipe.scheduler = TCDScheduler.from_config(pipe.scheduler.config)
+        
+        # Load LoRA weights with prefix=None
+        pipe.load_lora_weights(tcd_lora_id, adapter_name="tcd", prefix=None)
+        pipe.load_lora_weights(
+            motion_lora_id,
+            adapter_name="motion-lora",
+            prefix=None
+        )
+        
+        # Set adapter weights
+        pipe.set_adapters(["tcd", "motion-lora"], adapter_weights=[1.0, motion_scale])
+        
+        # Generate animation
+        generator = torch.Generator(device=device).manual_seed(seed)
+        frames = pipe(
+            prompt=prompt,
+            num_inference_steps=num_steps,
+            guidance_scale=guidance_scale,
+            cross_attention_kwargs={"scale": 1},
+            num_frames=num_frames,
+            eta=eta,
+            generator=generator
+        ).frames[0]
+        
+        # Export to GIF
+        gif_path = "animation.gif"
+        export_to_gif(frames, gif_path)
+        
+        # Cleanup
+        del pipe, adapter
+        cleanup_memory()
+        
+        return gif_path, "Animation generated successfully!"
+    except Exception as e:
+        cleanup_memory()
+        return None, f"Error generating animation: {str(e)}"
 
 # Create the Gradio interface
 with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
     gr.Markdown("# TCD-SDXL Image Generator")
-    gr.Markdown("Generate images using Trajectory Consistency Distillation with Stable Diffusion XL. Note: This runs on CPU, so generation may take some time.")
+    gr.Markdown("Generate images using Trajectory Consistency Distillation with Stable Diffusion XL. ")
     
     with gr.Tabs():
         with gr.TabItem("Text to Image"):
@@ -291,13 +388,15 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     text_guidance = gr.Slider(minimum=0, maximum=1, value=0, label="Guidance Scale")
                     text_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
                     text_button = gr.Button("Generate")
+                    text_status = gr.Textbox(label="Status", interactive=False)
                 with gr.Column():
                     text_output = gr.Image(label="Generated Image")
             
             text_button.click(
                 fn=generate_image,
                 inputs=[text_prompt, text_seed, text_steps, text_guidance, text_eta],
-                outputs=text_output
+                outputs=[text_output, text_status],
+                api_name="generate_image"
             )
         
         with gr.TabItem("Inpainting"):
@@ -316,8 +415,13 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     inpaint_eta = gr.Slider(minimum=0, maximum=1, value=0.3, label="Eta")
                     inpaint_strength = gr.Slider(minimum=0, maximum=1, value=0.99, label="Strength")
                     inpaint_button = gr.Button("Inpaint")
+                    inpaint_status = gr.Textbox(label="Status", interactive=False)
                 with gr.Column():
-                    inpaint_output = gr.Image(label="Result (Original | Mask | Generated)")
+                    # Display individual images in a row
+                    with gr.Row():
+                        inpaint_output_original = gr.Image(label="Original")
+                        inpaint_output_mask = gr.Image(label="Mask")
+                        inpaint_output_generated = gr.Image(label="Generated")
             
             inpaint_button.click(
                 fn=inpaint_image,
@@ -325,7 +429,8 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     inpaint_prompt, init_image, mask_image, inpaint_seed,
                     inpaint_steps, inpaint_guidance, inpaint_eta, inpaint_strength
                 ],
-                outputs=inpaint_output
+                # Map function outputs to individual image components and status
+                outputs=[inpaint_output_original, inpaint_output_mask, inpaint_output_generated, inpaint_status]
             )
             
         with gr.TabItem("Community Models"):
@@ -348,6 +453,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     community_button = gr.Button("Generate")
                 with gr.Column():
                     community_output = gr.Image(label="Generated Image")
+                    community_status = gr.Textbox(label="Status", interactive=False)
             
             community_button.click(
                 fn=generate_community_image,
@@ -355,7 +461,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     community_prompt, model_dropdown, community_seed,
                     community_steps, community_guidance, community_eta
                 ],
-                outputs=community_output
+                outputs=[community_output, community_status]
             )
             
         with gr.TabItem("Style Mixing"):
@@ -374,6 +480,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     style_button = gr.Button("Generate")
                 with gr.Column():
                     style_output = gr.Image(label="Generated Image")
+                    style_status = gr.Textbox(label="Status", interactive=False)
             
             style_button.click(
                 fn=generate_style_mix,
@@ -381,7 +488,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     style_prompt, style_seed, style_steps,
                     style_guidance, style_eta, style_weight
                 ],
-                outputs=style_output
+                outputs=[style_output, style_status]
             )
             
         with gr.TabItem("ControlNet"):
@@ -401,6 +508,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     control_button = gr.Button("Generate")
                 with gr.Column():
                     control_output = gr.Image(label="Result (Depth Map | Generated)")
+                    control_status = gr.Textbox(label="Status", interactive=False)
             
             control_button.click(
                 fn=generate_controlnet,
@@ -408,7 +516,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     control_prompt, control_image, control_seed,
                     control_steps, control_guidance, control_eta, control_scale
                 ],
-                outputs=control_output
+                outputs=[control_output, control_status]
             )
 
         with gr.TabItem("Animation"):
@@ -427,7 +535,8 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     anim_motion_scale = gr.Slider(minimum=0, maximum=2, value=1.2, label="Motion Scale", step=0.1)
                     anim_button = gr.Button("Generate Animation")
                 with gr.Column():
-                    anim_output = gr.Image(label="Generated Animation", format="gif")
+                    anim_output = gr.Image(label="Generated Animation")
+                    anim_status = gr.Textbox(label="Status", interactive=False)
             
             anim_button.click(
                 fn=generate_animation,
@@ -436,7 +545,7 @@ with gr.Blocks(title="TCD-SDXL Image Generator") as demo:
                     anim_guidance, anim_eta, anim_frames,
                     anim_motion_scale
                 ],
-                outputs=anim_output
+                outputs=[anim_output, anim_status]
             )
 
 if __name__ == "__main__":
